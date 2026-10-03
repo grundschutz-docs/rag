@@ -1,0 +1,39 @@
+# Zero-setup local demo path: `docker compose up -d` gives you a local
+# Qdrant and a local Ollama with bge-m3 already pulled, so `gspp-rag import`
+# works immediately with zero paid services and zero manual model pulls.
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot init container: pulls bge-m3 into the ollama service above, then
+  # exits. Runs every `docker compose up`, but Ollama skips the download if
+  # the model is already present.
+  ollama-pull-bge-m3:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=ollama:11434
+    entrypoint: ["ollama"]
+    command: ["pull", "bge-m3"]
+
+volumes:
+  qdrant_data:
+  ollama_data:

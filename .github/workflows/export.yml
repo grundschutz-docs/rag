@@ -1,0 +1,57 @@
+name: Export catalog
+
+on:
+  schedule:
+    # Daily, 30 min after grundschutz-docs/docs' own sync-catalog.yml (06:00
+    # UTC) -- staggered so both repos don't hit the same upstream repo in
+    # the same minute, catches catalog updates the same day either way.
+    - cron: '30 6 * * *'
+  workflow_dispatch:
+
+# A manual run landing on top of the daily cron would otherwise push the
+# same branch from two directions at once.
+concurrency:
+  group: export-catalog
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v7
+
+      - name: Checkout upstream BSI catalog
+        uses: actions/checkout@v7
+        with:
+          repository: BSI-Bund/Stand-der-Technik-Bibliothek
+          sparse-checkout: |
+            control_layer/Grundschutz++
+            control_layer/Mappings
+            documentation/namespaces
+          path: upstream
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Export JSONL from the upstream catalog
+        # export.py is pure stdlib, no install step needed.
+        env:
+          GRUNDSCHUTZPP_CATALOG: upstream/control_layer/Grundschutz++/Grundschutz++-resolved_catalog.json
+          GRUNDSCHUTZPP_BASETHREATS: upstream/documentation/namespaces/basethreats.csv
+          GRUNDSCHUTZPP_TAGS: upstream/documentation/namespaces/tags.csv
+          GRUNDSCHUTZPP_MAPPING: upstream/control_layer/Mappings/IT-GS2023-zu-GSpp/ITGS-to-GS++-mapping_collection.json
+        run: python3 export.py
+
+      - name: Commit if changed
+        # Direct commit, not a PR like grundschutz-docs/docs' sync-catalog.yml:
+        # this is a pure mechanical transform (OSCAL JSON -> JSONL), nothing
+        # here is hand-rendered prose that benefits from human review.
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/grundschutzpp-controls.jsonl
+          git diff --cached --quiet || git commit -m "Sync export with upstream Grundschutz++ catalog"
+          git push
