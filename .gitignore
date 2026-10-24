@@ -3,5 +3,7 @@ __pycache__/
 .venv/
 
 .env
+# pre-.env name; old copies can still hold an API key
+index.conf
 
 .DS_Store

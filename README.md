@@ -87,7 +87,7 @@ One JSON object per line, one line per control/requirement (1000 total — every
 | `EMBEDDING_API_KEY` | — | only for servers that require a key; leave empty for local ones |
 | `BATCH_SIZE` | `32` | |
 
-Everything is also available as a CLI flag (`./run.sh --base-url https://api.openai.com/v1 --embedding-model text-embedding-3-small --api-key sk-… --collection my-collection`), which overrides `.env`.
+Everything is also available as a CLI flag (`./run.sh --base-url http://localhost:8000/v1 --embedding-model BAAI/bge-m3 --collection my-collection`), which overrides `.env`. Keep `EMBEDDING_API_KEY` in `.env` rather than passing `--api-key`, so the key does not end up in your shell history.
 
 **Switching models:** every model returns vectors of its own size (bge-m3: 1024, for instance). A Qdrant collection fixes that size when it is created, so after changing `EMBEDDING_MODEL` use a new `QDRANT_COLLECTION` or delete the old one. Indexing and querying stop with a message that says so if the sizes do not match.
 

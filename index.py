@@ -71,7 +71,7 @@ def embed_batch(args: argparse.Namespace, texts: list[str], retries: int = 5) ->
                 # Wrong URL, key or model name: retrying for half a minute won't fix it.
                 raise RuntimeError(f"{url} answered {resp.status_code}: {resp.text[:300]}")
             resp.raise_for_status()
-            data = sorted(resp.json()["data"], key=lambda d: d["index"])
+            data = sorted(resp.json()["data"], key=lambda d: d.get("index", 0))  # stable: keeps server order if a server omits "index"
             if len(data) != len(texts):
                 raise ValueError(f"sent {len(texts)} texts, got {len(data)} embeddings back")
             return [item["embedding"] for item in data]
@@ -86,10 +86,10 @@ def embed_batch(args: argparse.Namespace, texts: list[str], retries: int = 5) ->
 
 def add_embedding_args(p: argparse.ArgumentParser):
     """The settings index.py and query.py share, so both read them the same way."""
-    p.add_argument("--base-url", default=os.environ.get("EMBEDDING_BASE_URL", DEFAULT_BASE_URL),
+    p.add_argument("--base-url", default=os.environ.get("EMBEDDING_BASE_URL") or DEFAULT_BASE_URL,
                    help="OpenAI-compatible API root, e.g. http://localhost:11434/v1")
     p.add_argument("--api-key", default=os.environ.get("EMBEDDING_API_KEY", ""), help="leave empty for local servers")
-    p.add_argument("--embedding-model", default=os.environ.get("EMBEDDING_MODEL", DEFAULT_MODEL))
+    p.add_argument("--embedding-model", default=os.environ.get("EMBEDDING_MODEL") or DEFAULT_MODEL)
 
 
 def point_id_for(control_id: str) -> str:
