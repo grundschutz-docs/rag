@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""data/grundschutzpp-controls.jsonl -> embeddings (Ollama or OpenAI) -> Qdrant upsert.
+"""data/grundschutzpp-controls.jsonl -> embeddings (any OpenAI-compatible API) -> Qdrant upsert.
 
-Assumes Qdrant and (if using the local provider) Ollama are already running
-somewhere reachable -- this script only indexes, it doesn't stand up
-infrastructure. If you don't have those yet, docker-compose.yml gives you
-both locally.
+Assumes Qdrant and an embedding server (Ollama, vLLM, OpenAI, ...) are
+already running somewhere reachable -- this script only indexes, it doesn't
+stand up infrastructure. If you don't have those yet, docker-compose.yml gives
+you Qdrant and Ollama locally.
 """
 import argparse
 import json
@@ -20,11 +20,22 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models as qm
 from tqdm import tqdm
 
-CONFIG_FILENAME = "index.conf"  # not ".env": matches this project's other ingest tools
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), CONFIG_FILENAME))
+CONFIG_FILENAME = ".env"
+LEGACY_CONFIG_FILENAME = "index.conf"
+HERE = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(dotenv_path=os.path.join(HERE, CONFIG_FILENAME))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("index")
+
+# Ollama's own OpenAI-compatible endpoint, so a bare checkout works with the
+# docker-compose.yml setup without any configuration.
+DEFAULT_BASE_URL = "http://localhost:11434/v1"
+DEFAULT_MODEL = "bge-m3"
+# Settings of the earlier provider switch. They would otherwise be ignored
+# without a word -- and a leftover OPENAI_API_KEY would then quietly send
+# the run to the local Ollama instead of OpenAI.
+REMOVED_SETTINGS = ("EMBEDDING_PROVIDER", "OLLAMA_URL", "OPENAI_API_KEY")
 
 # Fixed once, used for every point ID this script ever creates -- not meant
 # to match any other project's namespace, just needs to stay constant here.
@@ -37,62 +48,68 @@ def load_records(path: str) -> list[dict]:
         return [json.loads(line) for line in f if line.strip()]
 
 
-def embed_batch_ollama(ollama_url: str, model: str, texts: list[str], retries: int = 5) -> list[list[float]]:
-    url = f"{ollama_url.rstrip('/')}/api/embed"
+def warn_about_old_config():
+    if os.path.exists(os.path.join(HERE, LEGACY_CONFIG_FILENAME)):
+        log.warning("%s is no longer read -- copy your settings to %s (see .env.example)", LEGACY_CONFIG_FILENAME, CONFIG_FILENAME)
+    stale = [k for k in REMOVED_SETTINGS if os.environ.get(k)]
+    if stale:
+        log.warning(
+            "ignoring removed setting(s): %s -- set EMBEDDING_BASE_URL, EMBEDDING_API_KEY and EMBEDDING_MODEL instead (see .env.example)",
+            ", ".join(stale),
+        )
+
+
+def embed_batch(args: argparse.Namespace, texts: list[str], retries: int = 5) -> list[list[float]]:
+    """POST to {base_url}/embeddings, the one endpoint every OpenAI-compatible server shares."""
+    url = f"{args.base_url.rstrip('/')}/embeddings"
+    headers = {"Authorization": f"Bearer {args.api_key}"} if args.api_key else {}
     delay = 2.0
     for attempt in range(1, retries + 1):
         try:
-            resp = requests.post(url, json={"model": model, "input": texts}, timeout=120)
+            resp = requests.post(url, headers=headers, json={"model": args.embedding_model, "input": texts}, timeout=120)
+            if 400 <= resp.status_code < 500 and resp.status_code != 429:
+                # Wrong URL, key or model name: retrying for half a minute won't fix it.
+                raise RuntimeError(f"{url} answered {resp.status_code}: {resp.text[:300]}")
             resp.raise_for_status()
-            data = resp.json()
-            embeddings = data.get("embeddings")
-            if not embeddings or len(embeddings) != len(texts):
-                raise RuntimeError(f"unexpected embedding response shape: {data.keys()}")
-            return embeddings
-        except (requests.RequestException, RuntimeError) as e:
+            data = sorted(resp.json()["data"], key=lambda d: d.get("index", 0))  # stable: keeps server order if a server omits "index"
+            if len(data) != len(texts):
+                raise ValueError(f"sent {len(texts)} texts, got {len(data)} embeddings back")
+            return [item["embedding"] for item in data]
+        except (requests.RequestException, KeyError, ValueError) as e:
             if attempt == retries:
                 raise
-            log.warning("embed_batch (ollama) attempt %d/%d failed: %s (retrying in %.1fs)", attempt, retries, e, delay)
+            log.warning("embed_batch attempt %d/%d failed: %s (retrying in %.1fs)", attempt, retries, e, delay)
             time.sleep(delay)
             delay *= 2
     raise RuntimeError("unreachable")
 
 
-def embed_batch_openai(api_key: str, model: str, texts: list[str], retries: int = 5) -> list[list[float]]:
-    url = "https://api.openai.com/v1/embeddings"
-    headers = {"Authorization": f"Bearer {api_key}"}
-    delay = 2.0
-    for attempt in range(1, retries + 1):
-        try:
-            resp = requests.post(url, headers=headers, json={"model": model, "input": texts}, timeout=120)
-            resp.raise_for_status()
-            data = resp.json()["data"]
-            return [item["embedding"] for item in sorted(data, key=lambda d: d["index"])]
-        except (requests.RequestException, KeyError) as e:
-            if attempt == retries:
-                raise
-            log.warning("embed_batch (openai) attempt %d/%d failed: %s (retrying in %.1fs)", attempt, retries, e, delay)
-            time.sleep(delay)
-            delay *= 2
-    raise RuntimeError("unreachable")
-
-
-def embed_batch(args: argparse.Namespace, texts: list[str]) -> list[list[float]]:
-    if args.provider == "ollama":
-        return embed_batch_ollama(args.ollama_url, args.embedding_model, texts)
-    if args.provider == "openai":
-        if not args.openai_api_key:
-            raise RuntimeError("OPENAI_API_KEY is not set (index.conf or --openai-api-key)")
-        return embed_batch_openai(args.openai_api_key, args.embedding_model, texts)
-    raise ValueError(f"unknown provider: {args.provider!r}")
+def add_embedding_args(p: argparse.ArgumentParser):
+    """The settings index.py and query.py share, so both read them the same way."""
+    p.add_argument("--base-url", default=os.environ.get("EMBEDDING_BASE_URL") or DEFAULT_BASE_URL,
+                   help="OpenAI-compatible API root, e.g. http://localhost:11434/v1")
+    p.add_argument("--api-key", default=os.environ.get("EMBEDDING_API_KEY", ""), help="leave empty for local servers")
+    p.add_argument("--embedding-model", default=os.environ.get("EMBEDDING_MODEL") or DEFAULT_MODEL)
 
 
 def point_id_for(control_id: str) -> str:
     return str(uuid.uuid5(NAMESPACE, control_id))
 
 
-def ensure_collection(client: QdrantClient, name: str, dim: int):
+def check_collection_dim(client: QdrantClient, name: str, dim: int, model: str):
+    """A collection fixes its vector size when created. Another model usually returns another size."""
+    vectors = client.get_collection(name).config.params.vectors
+    existing = vectors.size if isinstance(vectors, qm.VectorParams) else None  # named vectors: not made by this script
+    if existing is not None and existing != dim:
+        raise RuntimeError(
+            f"collection '{name}' holds {existing}-dimensional vectors, but model '{model}' returns {dim}. "
+            f"Set QDRANT_COLLECTION to a new name for this model, or delete the old collection."
+        )
+
+
+def ensure_collection(client: QdrantClient, name: str, dim: int, model: str):
     if client.collection_exists(name):
+        check_collection_dim(client, name, dim, model)
         return
     client.create_collection(
         collection_name=name,
@@ -108,9 +125,9 @@ def run(args: argparse.Namespace):
     client = QdrantClient(url=args.qdrant_url, api_key=args.qdrant_api_key or None)
 
     dim_probe = embed_batch(args, [records[0]["text"]])
-    ensure_collection(client, args.collection, dim=len(dim_probe[0]))
+    ensure_collection(client, args.collection, dim=len(dim_probe[0]), model=args.embedding_model)
 
-    for i in tqdm(range(0, len(records), args.batch_size), desc=f"embedding ({args.provider}) + upserting"):
+    for i in tqdm(range(0, len(records), args.batch_size), desc=f"embedding ({args.embedding_model}) + upserting"):
         batch = records[i : i + args.batch_size]
         vectors = embed_batch(args, [r["text"] for r in batch])
         points = [
@@ -122,7 +139,7 @@ def run(args: argparse.Namespace):
         # instead of duplicating them.
         client.upsert(collection_name=args.collection, points=points, wait=True)
 
-    log.info("done: %d controls embedded via '%s' and upserted into '%s'", len(records), args.provider, args.collection)
+    log.info("done: %d controls embedded with '%s' and upserted into '%s'", len(records), args.embedding_model, args.collection)
 
 
 def parse_args() -> argparse.Namespace:
@@ -131,19 +148,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--collection", default=os.environ.get("QDRANT_COLLECTION", "grundschutzpp"))
     p.add_argument("--qdrant-url", default=os.environ.get("QDRANT_URL", "http://localhost:6333"))
     p.add_argument("--qdrant-api-key", default=os.environ.get("QDRANT_API_KEY", ""))
-    p.add_argument("--provider", choices=["ollama", "openai"], default=os.environ.get("EMBEDDING_PROVIDER", "ollama"))
-    p.add_argument("--ollama-url", default=os.environ.get("OLLAMA_URL", "http://localhost:11434"))
-    p.add_argument("--openai-api-key", default=os.environ.get("OPENAI_API_KEY", ""))
-    p.add_argument(
-        "--embedding-model",
-        default=os.environ.get("EMBEDDING_MODEL"),
-        help="default: bge-m3 for ollama, text-embedding-3-small for openai",
-    )
+    add_embedding_args(p)
     p.add_argument("--batch-size", type=int, default=int(os.environ.get("BATCH_SIZE", 32)))
-    args = p.parse_args()
-    if not args.embedding_model:
-        args.embedding_model = "bge-m3" if args.provider == "ollama" else "text-embedding-3-small"
-    return args
+    warn_about_old_config()
+    return p.parse_args()
 
 
 if __name__ == "__main__":
