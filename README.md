@@ -2,7 +2,7 @@
 
 The BSI's Grundschutz++ catalog as data a language model can search: one JSONL file with all 1000 requirements, and a script that embeds it into [Qdrant](https://qdrant.tech). Runs entirely on your own hardware, or against any OpenAI-compatible API.
 
-This is the data pipeline behind [grundschutz-docs.de](https://grundschutz-docs.de), the readable rendering of the same catalog. It is for people who want to build their own RAG, chatbot or search on top of the catalog instead of reading the site.
+This is the data pipeline behind [grundschutz-docs.de](https://grundschutz-docs.de), the readable rendering of the same catalog. It is for people who want to build their own RAG, chatbot or search on top of the catalog instead of reading the site. What you can build with it, and what you still have to build yourself, is on the [RAG page](https://grundschutz-docs.de/en/rag/) of the site ([Deutsch](https://grundschutz-docs.de/rag/)).
 
 ## TL;DR
 
