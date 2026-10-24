@@ -7,7 +7,7 @@ import sys
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
 
-from index import CONFIG_FILENAME, embed_batch  # noqa: E402 -- reuses index.py's provider logic, no duplication
+from index import CONFIG_FILENAME, add_embedding_args, check_collection_dim, embed_batch, warn_about_old_config  # noqa: E402 -- reuses index.py's embedding logic, no duplication
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), CONFIG_FILENAME))
 
@@ -15,6 +15,8 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)),
 def run(args: argparse.Namespace):
     client = QdrantClient(url=args.qdrant_url, api_key=args.qdrant_api_key or None)
     vector = embed_batch(args, [args.question])[0]
+    if client.collection_exists(args.collection):
+        check_collection_dim(client, args.collection, len(vector), args.embedding_model)
     hits = client.query_points(collection_name=args.collection, query=vector, limit=args.limit).points
 
     if not hits:
@@ -36,15 +38,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--collection", default=os.environ.get("QDRANT_COLLECTION", "grundschutzpp"))
     p.add_argument("--qdrant-url", default=os.environ.get("QDRANT_URL", "http://localhost:6333"))
     p.add_argument("--qdrant-api-key", default=os.environ.get("QDRANT_API_KEY", ""))
-    p.add_argument("--provider", choices=["ollama", "openai"], default=os.environ.get("EMBEDDING_PROVIDER", "ollama"))
-    p.add_argument("--ollama-url", default=os.environ.get("OLLAMA_URL", "http://localhost:11434"))
-    p.add_argument("--openai-api-key", default=os.environ.get("OPENAI_API_KEY", ""))
-    p.add_argument("--embedding-model", default=os.environ.get("EMBEDDING_MODEL"))
+    add_embedding_args(p)
     p.add_argument("--limit", type=int, default=5)
-    args = p.parse_args()
-    if not args.embedding_model:
-        args.embedding_model = "bge-m3" if args.provider == "ollama" else "text-embedding-3-small"
-    return args
+    warn_about_old_config()
+    return p.parse_args()
 
 
 if __name__ == "__main__":

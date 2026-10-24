@@ -6,13 +6,13 @@ This is the data pipeline behind [grundschutz-docs.de](https://grundschutz-docs.
 
 ## Quickstart
 
-Already have Qdrant (and, if you want local embeddings, Ollama) running somewhere? Then this is the whole thing:
+Already have Qdrant and an embedding server (Ollama, vLLM, OpenAI, …) running somewhere? Then this is the whole thing:
 
 ```bash
 git clone https://github.com/grundschutz-docs/rag.git
 cd rag
-cp index.conf.example index.conf   # point it at your Qdrant/Ollama, or leave the localhost defaults
-./run.sh                           # embeds data/grundschutzpp-controls.jsonl, upserts into Qdrant
+cp .env.example .env   # point it at your Qdrant and embedding server, or leave the localhost defaults
+./run.sh               # embeds data/grundschutzpp-controls.jsonl, upserts into Qdrant
 ./query.sh "Wie oft muss ein Penetrationstest durchgeführt werden?"
 ```
 
@@ -24,7 +24,7 @@ cp index.conf.example index.conf   # point it at your Qdrant/Ollama, or leave th
 docker compose up -d   # local Qdrant + local Ollama, bge-m3 pulled automatically
 ```
 
-then run the quickstart above against the defaults in `index.conf.example` (`localhost:6333` / `localhost:11434`) — nothing else changes.
+then run the quickstart above against the defaults in `.env.example` (`localhost:6333` / `localhost:11434`) — nothing else changes.
 
 ## Architecture
 
@@ -38,10 +38,11 @@ Technik-Bibliothek  ───▶  (daily CI)   ───▶  controls.jsonl
                                                       │
                                      ┌────────────────┴────────────────┐
                                      ▼                                 ▼
-                          embed via Ollama (local)         embed via OpenAI (paid)
-                           --provider ollama (default)      --provider openai
+                          embed via Ollama / vLLM          embed via OpenAI /
+                          (your own server)                any other API
                                      │                                 │
                                      └────────────────┬────────────────┘
+                                         one setting: EMBEDDING_BASE_URL
                                                       ▼
                                          Qdrant (local or Cloud --
                                          same client, just a different URL)
@@ -50,7 +51,7 @@ Technik-Bibliothek  ───▶  (daily CI)   ───▶  controls.jsonl
                                     query.sh "<your question>"
 ```
 
-`export.py` never touches an embedding model or Qdrant — it only turns the OSCAL catalog into clean JSONL. Which embedding provider and which Qdrant you point at is a config choice (`index.conf`, or `--provider`/`--qdrant-url` flags), not a code fork — `index.py` and `query.py` share the same `embed_batch()` for both providers.
+`export.py` never touches an embedding model or Qdrant — it only turns the OSCAL catalog into clean JSONL. Which embedding server and which Qdrant you point at is a config choice (`.env`, or `--base-url`/`--qdrant-url` flags), not a code fork. The only requirement on the embedding server is that it speaks the OpenAI embeddings API (`POST {base_url}/embeddings`); `index.py` and `query.py` share the same `embed_batch()`.
 
 ## The data: `data/grundschutzpp-controls.jsonl`
 
@@ -74,26 +75,29 @@ One JSON object per line, one line per control/requirement (1000 total — every
 
 `index.py` embeds the `text` field and stores the whole record as the Qdrant point's payload — use `text` as-is, or build your own composition from the raw fields (e.g. fold `tags` into the embedded text for better keyword alignment).
 
-## Configuration (`index.conf`, see `index.conf.example`)
+## Configuration (`.env`, see `.env.example`)
 
 | Variable | Default | Notes |
 |---|---|---|
 | `QDRANT_URL` | `http://localhost:6333` | point this at Qdrant Cloud instead and nothing else changes |
 | `QDRANT_API_KEY` | — | only needed for Qdrant Cloud |
 | `QDRANT_COLLECTION` | `grundschutzpp` | |
-| `EMBEDDING_PROVIDER` | `ollama` | `ollama` or `openai` |
-| `OLLAMA_URL` | `http://localhost:11434` | only used when `EMBEDDING_PROVIDER=ollama` |
-| `OPENAI_API_KEY` | — | only used when `EMBEDDING_PROVIDER=openai` |
-| `EMBEDDING_MODEL` | `bge-m3` (ollama) / `text-embedding-3-small` (openai) | |
+| `EMBEDDING_BASE_URL` | `http://localhost:11434/v1` | root of any OpenAI-compatible API: the Ollama from `docker-compose.yml`, vLLM, OpenAI, … |
+| `EMBEDDING_MODEL` | `bge-m3` | the model name as that server knows it |
+| `EMBEDDING_API_KEY` | — | only for servers that require a key; leave empty for local ones |
 | `BATCH_SIZE` | `32` | |
 
-Everything is also available as a CLI flag (`./run.sh --provider openai --collection my-collection`), which overrides `index.conf`.
+Everything is also available as a CLI flag (`./run.sh --base-url https://api.openai.com/v1 --embedding-model text-embedding-3-small --api-key sk-… --collection my-collection`), which overrides `.env`.
+
+**Switching models:** every model returns vectors of its own size (bge-m3: 1024, for instance). A Qdrant collection fixes that size when it is created, so after changing `EMBEDDING_MODEL` use a new `QDRANT_COLLECTION` or delete the old one. Indexing and querying stop with a message that says so if the sizes do not match.
+
+**Coming from an earlier version?** `index.conf` is now `.env`, and `EMBEDDING_PROVIDER`, `OLLAMA_URL` and `OPENAI_API_KEY` were replaced by the three `EMBEDDING_*` settings above. The scripts warn if they still find the old names.
 
 Re-running `./run.sh` after a catalog update is safe — each control's Qdrant point ID is deterministic (derived from its control ID), so re-imports overwrite in place instead of duplicating.
 
 ## Regenerating the export yourself
 
-You only need this if you don't trust the committed `data/grundschutzpp-controls.jsonl` or want to point it at a different catalog edition. `export.py` is pure stdlib (no install step) and reads the OSCAL catalog plus three BSI-provided auxiliary files (`basethreats.csv`, `tags.csv`, the old↔new mapping JSON) from a local sibling checkout of [`BSI-Bund/Stand-der-Technik-Bibliothek`](https://github.com/BSI-Bund/Stand-der-Technik-Bibliothek) by default, same layout as [`grundschutz-docs/docs`](https://github.com/grundschutz-docs/docs) — or via the `GRUNDSCHUTZPP_*` environment variables (see `index.conf.example`), same convention `.github/workflows/export.yml` uses in CI.
+You only need this if you don't trust the committed `data/grundschutzpp-controls.jsonl` or want to point it at a different catalog edition. `export.py` is pure stdlib (no install step) and reads the OSCAL catalog plus three BSI-provided auxiliary files (`basethreats.csv`, `tags.csv`, the old↔new mapping JSON) from a local sibling checkout of [`BSI-Bund/Stand-der-Technik-Bibliothek`](https://github.com/BSI-Bund/Stand-der-Technik-Bibliothek) by default, same layout as [`grundschutz-docs/docs`](https://github.com/grundschutz-docs/docs) — or via the `GRUNDSCHUTZPP_*` environment variables (see `.env.example`), same convention `.github/workflows/export.yml` uses in CI.
 
 ```bash
 python3 export.py
