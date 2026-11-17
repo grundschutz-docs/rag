@@ -1,3 +1,10 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/images/banner-dark.png">
+  <img alt="grundschutz-docs/rag: embed it, index it, query it, build on it. One JSONL line per requirement, any OpenAI-compatible embedding server, local or hosted, Qdrant, and your own RAG on top." src=".github/images/banner-light.png">
+</picture>
+
+<sub>The banner is an illustration, not a screenshot.</sub>
+
 # grundschutz-docs/rag
 
 The BSI's Grundschutz++ catalog as data a language model can search: one JSONL file with all 1000 requirements, and a script that embeds it into [Qdrant](https://qdrant.tech). Works with any OpenAI-compatible embedding server, local or hosted, so it can run entirely on your own hardware.
